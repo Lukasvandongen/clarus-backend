@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=["https://degrondvraag.vercel.app"])
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -51,7 +51,7 @@ Je geeft **nooit automatisch een samenvatting** of analyse — alleen als de geb
 
 """
 
-@app.route('/api/clarus', methods=['POST'])
+@app.route('/chat', methods=['POST'])
 def clarus():
     data = request.get_json()
     essay = data.get('essay', '')
@@ -69,6 +69,9 @@ def clarus():
                 "role": msg["role"],
                 "content": msg["content"]
             })
+
+    if not data:
+        return jsonify({"antwoord": "Geen geldige data ontvangen"}), 400
 
     if vraag:
         messages.append({"role": "user", "content": vraag})
