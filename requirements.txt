@@ -3,3 +3,6 @@ flask-cors
 openai
 python-dotenv
 gunicorn
+langchain
+langchain-community
+git+https://github.com/pinecone-io/pinecone-python-client.git@v3.0.0
