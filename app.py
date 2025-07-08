@@ -108,30 +108,19 @@ def clarus():
             max_tokens=800,
             temperature=0.5,
         )
-        answer = response.choices[0].message.content
-        import logging
+        first_answer = response.choices[0].message.content
 
-        logging.basicConfig(level=logging.INFO)
-
-        # En dan in de functie:
-        logging.info("Prompt History: %s", messages)
-        logging.info("AI Response: %s", answer)
-
-
-
-
-        if answer.lower().startswith("zoek in de bijbel naar:"):
-            zoekterm = answer.split(":", 1)[1].strip()
+        # Check op bijbeltrigger (alleen intern)
+        if first_answer.lower().startswith("zoek in de bijbel naar:"):
+            zoekterm = first_answer.split(":", 1)[1].strip()
             bijbel_docs = search_pinecone(zoekterm)
             bijbel_tekst = "\n".join([doc.page_content for doc in bijbel_docs])
 
-            # overschrijf de messages zónder die eerste GPT-output
-            messages = [
-                {"role": "system", "content": clarus_prompt},
-                {"role": "user", "content": f"Essay: {essay}"},
-                {"role": "user", "content": f"Bijbelverzen:\n{bijbel_tekst}"},
-                {"role": "user", "content": vraag}
-            ]
+            messages.append({
+                "role": "user",
+                "content": f"Bijbelverzen:\n{bijbel_tekst}"
+            })
+            messages.append({"role": "user", "content": vraag})
 
             # Tweede call met bijbelcontext
             response = openai.chat.completions.create(
@@ -140,10 +129,13 @@ def clarus():
                 max_tokens=800,
                 temperature=0.5,
             )
-            answer = response.choices[0].message.content
+            final_answer = response.choices[0].message.content
+        else:
+            final_answer = first_answer
 
+        # Alleen het uiteindelijke antwoord terugsturen
+        return jsonify({"antwoord": final_answer})
 
-        return jsonify({"antwoord": answer})
 
     except Exception as e:
         print(e)
