@@ -95,6 +95,16 @@ def clarus():
             temperature=0.7,
         )
         answer = response.choices[0].message.content
+        import logging
+
+        logging.basicConfig(level=logging.INFO)
+
+        # En dan in de functie:
+        logging.info("Prompt History: %s", messages)
+        logging.info("AI Response: %s", answer)
+
+
+
 
         if answer.lower().startswith("zoek in de bijbel naar:"):
             zoekterm = answer.split(":", 1)[1].strip()
