@@ -6,6 +6,7 @@ import openai
 from langchain.vectorstores import Pinecone as PineconeLangchain
 from langchain.embeddings import OpenAIEmbeddings
 
+
 load_dotenv()
 
 # === Init embeddings en Pinecone ===
@@ -124,20 +125,23 @@ def clarus():
             bijbel_docs = search_pinecone(zoekterm)
             bijbel_tekst = "\n".join([doc.page_content for doc in bijbel_docs])
 
-            messages.append({
-                "role": "user",
-                "content": f"Bijbelverzen:\n{bijbel_tekst}"
-            })
-            messages.append({"role": "user", "content": vraag})
+            # overschrijf de messages zónder die eerste GPT-output
+            messages = [
+                {"role": "system", "content": clarus_prompt},
+                {"role": "user", "content": f"Essay: {essay}"},
+                {"role": "user", "content": f"Bijbelverzen:\n{bijbel_tekst}"},
+                {"role": "user", "content": vraag}
+            ]
 
             # Tweede call met bijbelcontext
             response = openai.chat.completions.create(
-                model="gpt-4.1-nano",
+                model="gpt-4.1-mini",
                 messages=messages,
-                max_tokens=400,
-                temperature=0.7,
+                max_tokens=800,
+                temperature=0.5,
             )
             answer = response.choices[0].message.content
+
 
         return jsonify({"antwoord": answer})
 
