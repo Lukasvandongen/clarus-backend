@@ -3,22 +3,54 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import openai
-from langchain.vectorstores import Pinecone as PineconeLangchain
+import qdrant_client
+from qdrant_client.http import models as qmodels
+import uuid
 from langchain.embeddings import OpenAIEmbeddings
 
 
 load_dotenv()
 
-# === Init embeddings en Pinecone ===
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-vectorstore = PineconeLangchain.from_existing_index(
-    index_name=os.getenv("PINECONE_INDEX"),
-    embedding=embeddings
+qdrant = qdrant_client.QdrantClient(
+    url=os.getenv("QDRANT_HOST"),
+    api_key=os.getenv("QDRANT_API_KEY"),
 )
 
-def search_pinecone(query: str, k=5):
-    docs = vectorstore.similarity_search(query, k=k)
-    return docs
+COLLECTION_NAME = "bijbel"
+
+
+def search_qdrant(query: str, k=5):
+    embedding_response = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY")).embeddings.create(
+        input=query,
+        model="text-embedding-3-small"
+    )
+    vector = embedding_response.data[0].embedding
+
+    hits = qdrant.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=vector,
+        limit=k,
+        with_payload=True
+    )
+
+    class FakeDoc:
+        def __init__(self, content, boek, hoofdstuk, vers):
+            self.page_content = content
+            self.boek = boek
+            self.hoofdstuk = hoofdstuk
+            self.vers = vers
+
+    return [
+        FakeDoc(
+            content=hit.payload.get("tekst", ""),
+            boek=hit.payload.get("boek", ""),
+            hoofdstuk=hit.payload.get("hoofdstuk", ""),
+            vers=hit.payload.get("vers", "")
+        )
+        for hit in hits
+        if "tekst" in hit.payload
+    ]
+
 
 # === Init Flask App ===
 app = Flask(__name__)
@@ -50,7 +82,7 @@ Jouw enige taak is om lezers te helpen die diepgang zoeken in een essay dat ze a
 - Hou je taal zuiver, menselijk, en licht filosofisch.
 - Gebruik korte alinea’s (max 3–4 zinnen), geen opsommingen tenzij het echt helpt.
 - Je bent warm, maar niet wollig.
-- Wanneer een bijbelvers als context is meegeleverd (zoals via Pinecone), dan:
+- Wanneer een bijbelvers als context is meegeleverd (zoals via Qdrant), dan:
 -       Geef je **altijd eerst een letterlijke quote** van dat vers zoals het exact werd opgeslagen.
 -       Gebruik nooit een samenvatting of herformulering in plaats van het originele vers.
 -       Gebruik het contextveld **uitsluitend als bron**, niet als inspiratie.
@@ -63,7 +95,7 @@ Jouw enige taak is om lezers te helpen die diepgang zoeken in een essay dat ze a
   “Zoek in de Bijbel naar:”  gevolgd met de zoekterm die relevant is voor de vraag.
 - De gebruiker hoeft geen specifieke Bijbelverzen te noemen; jij zoekt zelf de relevante context
   De backend zal dan automatisch de juiste verzen laden om je te helpen antwoorden.
-- Indien je verzen uit Pinecone krijgt, citeer deze exact zoals ze zijn — met behoud van interpunctie en hoofdletters. Gebruik geen herformulering of synoniemen tenzij de gebruiker dat vraagt.
+- Indien je verzen uit Qdrant krijgt, citeer deze exact zoals ze zijn — met behoud van interpunctie en hoofdletters. Gebruik geen herformulering of synoniemen tenzij de gebruiker dat vraagt.
 - Wanneer er een specifiek vers is geladen via de backend, en het vers in context relevant is, **geef dan altijd eerst een letterlijke quote**. Daarna mag je desgewenst kort toelichten of verkennen wat het vers betekent.
 - Gebruik bij citaten een bronvermelding zoals Genesis 1:1 of Johannes 3:16, afhankelijk van het vers.
 - Vat het vers nooit samen zonder eerst een letterlijke quote te geven.
@@ -113,8 +145,11 @@ def clarus():
         # Check op bijbeltrigger (alleen intern)
         if first_answer.lower().startswith("zoek in de bijbel naar:"):
             zoekterm = first_answer.split(":", 1)[1].strip()
-            bijbel_docs = search_pinecone(zoekterm)
-            bijbel_tekst = "\n".join([doc.page_content for doc in bijbel_docs])
+            bijbel_docs = search_qdrant(zoekterm)
+            bijbel_tekst = "\n".join(
+    [f'{doc.boek} {doc.hoofdstuk}:{doc.vers} — {doc.page_content}' for doc in bijbel_docs]
+)
+
 
             messages.append({
                 "role": "user",
