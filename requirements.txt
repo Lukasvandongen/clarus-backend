@@ -6,4 +6,4 @@ gunicorn
 langchain
 langchain-community
 tiktoken
-git+https://github.com/pinecone-io/pinecone-python-client.git@v3.0.0
+import qdrant_client
