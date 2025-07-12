@@ -6,4 +6,6 @@ gunicorn
 langchain
 langchain-community
 tiktoken
-import qdrant_client
+qdrant_client
+uuid
+qdrant_client.http
