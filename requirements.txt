@@ -1,0 +1,10 @@
+flask
+flask-cors
+openai
+python-dotenv
+gunicorn
+langchain
+langchain-community
+tiktoken
+qdrant_client
+uuid
