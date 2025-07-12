@@ -55,7 +55,7 @@ def search_qdrant(query: str, k=5):
 
 # === Init Flask App ===
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": ["https://www.degrondvraag.com", "https://degrondvraag.com"]}})
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # === Clarus System Prompt ===
@@ -120,6 +120,8 @@ Je geeft nooit automatisch een samenvatting of analyse — alleen als de gebruik
 @app.route('/chat', methods=['POST'])
 def clarus():
     data = request.get_json()
+    if not data:
+        return jsonify({"antwoord": "Geen geldige data ontvangen"}), 400
     essay = data.get('essay', '')
     vraag = data.get('vraag', '')
     history = data.get('history', [])
