@@ -7,7 +7,8 @@ import qdrant_client
 from qdrant_client.http import models as qmodels
 import uuid
 from langchain.embeddings import OpenAIEmbeddings
-
+import logging
+logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
@@ -76,6 +77,11 @@ Jouw enige taak is om lezers te helpen die diepgang zoeken in een essay dat ze a
 - Je geeft geen biografieën, feiten of bronnen buiten het essay zelf.
 - Geen verzonnen context of aannames.
 - Geen uitspraken over onderwerpen buiten het essay.
+- Jij mag nooit zelf een bijbelvers citeren of herformuleren.
+- Wanneer je denkt dat een vraag om een bijbelvers vraagt, zeg dan: "Bijbel nodig: Job 12:4" of "Bijbel nodig: relevant vers over schepping"
+- De backend zal dan de juiste verzen voor je ophalen.
+- Pas daarna mag je citeren of analyseren.
+
 
 *Stijl:
 - Schrijf in helder, natuurlijk Nederlands.
@@ -110,6 +116,7 @@ OF: "Fijn dat je er bent. Ik ben mijn geheugen aan het updaten, dit kan een minu
 Je geeft nooit automatisch een samenvatting of analyse — alleen als de gebruiker er expliciet om vraagt.
 """
 
+
 @app.route('/chat', methods=['POST'])
 def clarus():
     data = request.get_json()
@@ -129,52 +136,61 @@ def clarus():
     if not data:
         return jsonify({"antwoord": "Geen geldige data ontvangen"}), 400
 
-    if vraag:
-        messages.append({"role": "user", "content": vraag})
-
     try:
-        # Eerste call zonder bijbeldata
-        response = openai.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            max_tokens=800,
-            temperature=0.5,
-        )
-        first_answer = response.choices[0].message.content
-
-        # Check op bijbeltrigger (alleen intern)
-        if first_answer.lower().startswith("zoek in de bijbel naar:"):
-            zoekterm = first_answer.split(":", 1)[1].strip()
-            bijbel_docs = search_qdrant(zoekterm)
-            bijbel_tekst = "\n".join(
-    [f'{doc.boek} {doc.hoofdstuk}:{doc.vers} — {doc.page_content}' for doc in bijbel_docs]
-)
-
-
-            messages.append({
-                "role": "user",
-                "content": f"Bijbelverzen:\n{bijbel_tekst}"
-            })
+        if vraag:
             messages.append({"role": "user", "content": vraag})
+            logging.info(f"[Vraag ontvangen] {vraag}")
 
-            # Tweede call met bijbelcontext
             response = openai.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=messages,
                 max_tokens=800,
                 temperature=0.5,
             )
-            final_answer = response.choices[0].message.content
+            first_answer = response.choices[0].message.content
+            logging.info(f"[Clarus eerste antwoord] {first_answer}")
+
+            bijbel_trigger = None
+            if "bijbel nodig:" in first_answer.lower():
+                bijbel_trigger = first_answer.split(":", 1)[1].strip()
+                logging.info(f"[Bijbel context trigger herkend] {bijbel_trigger}")
+
+                bijbel_docs = search_qdrant(bijbel_trigger)
+                logging.info(f"[Bijbelverzen geladen] {len(bijbel_docs)} resultaten")
+
+                for doc in bijbel_docs:
+                    logging.info(f"[Vers] {doc.boek} {doc.hoofdstuk}:{doc.vers} – {doc.page_content[:60]}...")
+
+                bijbel_tekst = "\n".join(
+                    [f'{doc.boek} {doc.hoofdstuk}:{doc.vers} — {doc.page_content}' for doc in bijbel_docs]
+                )
+
+                messages.append({
+                    "role": "user",
+                    "content": f"Bijbelverzen:\n{bijbel_tekst}"
+                })
+                messages.append({"role": "user", "content": vraag})
+
+                response = openai.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=messages,
+                    max_tokens=800,
+                    temperature=0.5,
+                )
+                final_answer = response.choices[0].message.content
+            else:
+                final_answer = first_answer
+
+            logging.info(f"[Clarus eindantwoord] {final_answer}")
+            return jsonify({"antwoord": final_answer})
+
         else:
-            final_answer = first_answer
-
-        # Alleen het uiteindelijke antwoord terugsturen
-        return jsonify({"antwoord": final_answer})
-
+            return jsonify({"antwoord": "Geen vraag ontvangen"}), 400
 
     except Exception as e:
-        print(e)
+        logging.error(f"[Clarus error] {str(e)}")
         return jsonify({"error": "Er ging iets mis met Clarus."}), 500
+
 
 
 if __name__ == "__main__":
