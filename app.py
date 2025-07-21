@@ -137,42 +137,42 @@ def clarus():
                 max_tokens=800,
                 temperature=0.5,
             )
-            first_answer = response.choices[0].message.content
+            first_answer = response.choices[0].message.content.strip()
             logging.info(f"[Clarus eerste antwoord] {first_answer}")
 
+            # Check of Clarus intern om een bijbelvers vraagt
             bijbel_trigger = None
-            if "bijbel nodig:" in first_answer.lower():
+            if first_answer.lower().startswith("bijbel nodig:"):
                 bijbel_trigger = first_answer.split(":", 1)[1].strip()
                 logging.info(f"[Bijbel context trigger herkend] {bijbel_trigger}")
 
                 bijbel_docs = search_qdrant(bijbel_trigger)
                 logging.info(f"[Bijbelverzen geladen] {len(bijbel_docs)} resultaten")
 
-                for doc in bijbel_docs:
-                    logging.info(f"[Vers] {doc.boek} {doc.hoofdstuk}:{doc.vers} – {doc.page_content[:60]}...")
+                if bijbel_docs:
+                    bijbel_tekst = "\n".join(
+                        [f'{doc.boek} {doc.hoofdstuk}:{doc.vers} — {doc.page_content}' for doc in bijbel_docs]
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": f"Bijbelverzen:\n{bijbel_tekst}"
+                    })
+                    messages.append({"role": "user", "content": vraag})
 
-                bijbel_tekst = "\n".join(
-                    [f'{doc.boek} {doc.hoofdstuk}:{doc.vers} — {doc.page_content}' for doc in bijbel_docs]
-                )
-
-                messages.append({
-                    "role": "user",
-                    "content": f"Bijbelverzen:\n{bijbel_tekst}"
-                })
-                messages.append({"role": "user", "content": vraag})
-
-                response = openai.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=messages,
-                    max_tokens=800,
-                    temperature=0.5,
-                )
-                final_answer = response.choices[0].message.content
+                    response = openai.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=messages,
+                        max_tokens=800,
+                        temperature=0.5,
+                    )
+                    final_answer = response.choices[0].message.content.strip()
+                else:
+                    final_answer = "Het lukt mij niet om het vers erbij te pakken. Zou je deze handmatig kunnen delen?"
             else:
                 final_answer = first_answer
 
-            logging.info(f"[Clarus eindantwoord] {final_answer}")
-            return jsonify({"antwoord": final_answer})
+                logging.info(f"[Clarus eindantwoord] {final_answer}")
+                return jsonify({"antwoord": final_answer})
 
         else:
             return jsonify({"antwoord": "Geen vraag ontvangen"}), 400
@@ -180,6 +180,7 @@ def clarus():
     except Exception as e:
         logging.error(f"[Clarus error] {str(e)}")
         return jsonify({"error": "Er ging iets mis met Clarus."}), 500
+
 
 
 
