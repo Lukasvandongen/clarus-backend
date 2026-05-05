@@ -25,6 +25,7 @@ CORS_ORIGINS=https://www.degrondvraag.com,https://degrondvraag.com,http://localh
 - `GET /health` checks whether the service is alive.
 - `GET /clarus/about?language=nl` returns the public Clarus explanation.
 - `POST /chat` answers a Clarus question and writes one JSONL log entry.
+- `POST /chat-stream` streams a Clarus answer as server-sent events and writes one JSONL log entry.
 - `GET /admin/clarus/logs` returns recent logs for Firebase admins.
 
 ## Logs

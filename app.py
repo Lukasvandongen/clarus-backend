@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 from openai import OpenAI
 
@@ -39,6 +39,8 @@ DEFAULT_ORIGINS = [
     "https://degrondvraag.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
 ]
 
 CORS_ORIGINS = [
@@ -89,6 +91,8 @@ Style:
 - Avoid therapeutic language, motivational phrasing and casual chatbot filler.
 - Do not overstate certainty.
 - Never pretend to be human. If asked what you are, say you are Clarus, a model guided by pre-written instructions for this site.
+- Use Markdown for structure when it helps: short headings, numbered lists, bold key terms and italics for conceptual emphasis.
+- Do not use em dashes. Use commas, semicolons or parentheses instead.
 """.strip()
 
 
@@ -185,6 +189,51 @@ def create_completion(messages: List[Dict[str, str]]) -> Dict[str, Any]:
         except Exception as exc:  # Try the configured fallback before failing.
             last_error = exc
             logger.warning("Clarus model call failed for %s: %s", model, exc)
+
+    raise last_error or RuntimeError("No model configured.")
+
+
+def sse(event: str, payload: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def stream_completion(messages: List[Dict[str, str]]):
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    last_error: Optional[Exception] = None
+    for model in [CLARUS_MODEL, CLARUS_FALLBACK_MODEL]:
+        if not model:
+            continue
+        answer_parts: List[str] = []
+        usage: Dict[str, Any] = {}
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_completion_tokens=CLARUS_MAX_OUTPUT_TOKENS,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            yield "model", {"model": model}
+
+            for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage.model_dump()
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = getattr(chunk.choices[0], "delta", None)
+                token = getattr(delta, "content", None)
+                if token:
+                    answer_parts.append(token)
+                    yield "token", {"token": token}
+
+            answer = "".join(answer_parts).strip()
+            return {"answer": answer, "model": model, "usage": usage}
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Clarus streaming call failed for %s: %s", model, exc)
+            yield "status", {"message": "Clarus probeert een fallbackmodel."}
 
     raise last_error or RuntimeError("No model configured.")
 
@@ -313,6 +362,76 @@ def clarus_chat():
             "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
         })
         return jsonify({"error": "Er ging iets mis met Clarus."}), 500
+
+
+@app.route("/chat-stream", methods=["POST"])
+def clarus_chat_stream():
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("vraag") or "").strip()
+    if not question:
+        return jsonify({"error": "Geen vraag ontvangen."}), 400
+
+    language = normalize_language(data.get("language", ""), question)
+    messages = build_messages(data)
+    log_id = str(uuid.uuid4())
+
+    @stream_with_context
+    def generate():
+        try:
+            yield sse("status", {"message": "Clarus heeft de vraag ontvangen."})
+            completion_stream = stream_completion(messages)
+            while True:
+                try:
+                    event, payload = next(completion_stream)
+                    yield sse(event, payload)
+                except StopIteration as done:
+                    result = done.value
+                    break
+
+            if not result:
+                raise RuntimeError("Model returned no result.")
+
+            answer = result.get("answer", "")
+            if not answer:
+                raise RuntimeError("Model returned an empty answer.")
+
+            append_log({
+                "id": log_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "language": language,
+                "model": result["model"],
+                "essayId": data.get("essayId"),
+                "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+                "question": trim_text(question, 2400),
+                "answer": trim_text(answer, 5000),
+                "usage": result.get("usage", {}),
+                "ipHash": get_ip_hash(),
+                "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
+            })
+            yield sse("done", {"logId": log_id, "model": result["model"]})
+        except Exception as exc:
+            logger.exception("Clarus streaming error")
+            append_log({
+                "id": log_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "language": language,
+                "essayId": data.get("essayId"),
+                "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+                "question": trim_text(question, 2400),
+                "error": str(exc),
+                "ipHash": get_ip_hash(),
+                "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
+            })
+            yield sse("error", {"error": "Er ging iets mis met Clarus."})
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/admin/clarus/logs", methods=["GET"])
