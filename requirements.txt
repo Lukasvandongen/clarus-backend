@@ -1,10 +1,6 @@
 flask
 flask-cors
-openai>=1.30.0
+openai>=2.0.0
 python-dotenv
 gunicorn
-langchain
-langchain-community
-tiktoken
-qdrant_client
-uuid
+firebase-admin

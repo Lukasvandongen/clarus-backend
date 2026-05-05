@@ -1,302 +1,327 @@
-import os
+import hashlib
 import json
 import logging
+import os
 import re
-from typing import List, Dict, Any, Optional
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 from dotenv import load_dotenv
-
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 from openai import OpenAI
-import qdrant_client
-from qdrant_client.http import models as qmodels
+
+try:
+    import firebase_admin
+    from firebase_admin import auth, credentials
+except Exception:  # pragma: no cover - firebase-admin is optional until admin logs are enabled.
+    firebase_admin = None
+    auth = None
+    credentials = None
 
 load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("clarus")
 
-# ---------- Config ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-QDRANT_HOST = os.getenv("QDRANT_HOST")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "bijbel")
+CLARUS_MODEL = os.getenv("CLARUS_MODEL", "gpt-5.4-nano")
+CLARUS_FALLBACK_MODEL = os.getenv("CLARUS_FALLBACK_MODEL", "gpt-5.4-mini")
+CLARUS_MAX_OUTPUT_TOKENS = int(os.getenv("CLARUS_MAX_OUTPUT_TOKENS", "700"))
+CLARUS_LOG_PATH = Path(os.getenv("CLARUS_LOG_PATH", "logs/clarus_interactions.jsonl"))
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "luks@degrondvraag.com").strip().lower()
+IP_HASH_SALT = os.getenv("CLARUS_IP_HASH_SALT", "")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-qdrant = qdrant_client.QdrantClient(url=QDRANT_HOST, api_key=QDRANT_API_KEY)
-
-# ---------- Bible book normalization (NL) ----------
-# compact alias map; breid uit indien nodig
-ALIASES = {
-    "gen": "Genesis", "genesis": "Genesis",
-    "exo": "Exodus", "exodus": "Exodus",
-    "lev": "Leviticus", "leviticus": "Leviticus",
-    "num": "Numeri", "numeri": "Numeri",
-    "deut": "Deuteronomium", "deuteronomium": "Deuteronomium",
-    "jos": "Jozua", "jozua": "Jozua",
-    "rech": "Richteren", "richteren": "Richteren", "rechteren": "Richteren",
-    "rut": "Ruth", "ruth": "Ruth",
-    "1sam": "1 Samuël", "1 sam": "1 Samuël", "1 samuel": "1 Samuël",
-    "2sam": "2 Samuël", "2 sam": "2 Samuël", "2 samuel": "2 Samuël",
-    "1kon": "1 Koningen", "1 koning": "1 Koningen", "1 koningen": "1 Koningen",
-    "2kon": "2 Koningen", "2 koning": "2 Koningen", "2 koningen": "2 Koningen",
-    "1kron": "1 Kronieken", "1 kron": "1 Kronieken",
-    "2kron": "2 Kronieken", "2 kron": "2 Kronieken",
-    "ezra": "Ezra", "neh": "Nehemia", "nehemia": "Nehemia",
-    "est": "Ester", "ester": "Ester",
-    "job": "Job", "ps": "Psalmen", "psalm": "Psalmen", "psalmen": "Psalmen",
-    "spr": "Spreuken", "spreuken": "Spreuken",
-    "pred": "Prediker", "prediker": "Prediker",
-    "hooglied": "Hooglied",
-    "jes": "Jesaja", "jesaja": "Jesaja",
-    "jer": "Jeremia", "jeremia": "Jeremia",
-    "klaagliederen": "Klaagliederen",
-    "ez": "Ezechiël", "ezechiel": "Ezechiël",
-    "dan": "Daniël", "daniel": "Daniël",
-    "hos": "Hosea", "hosea": "Hosea",
-    "joel": "Joël", "jool": "Joël", "joël": "Joël",
-    "amos": "Amos", "obadja": "Obadja", "jona": "Jona",
-    "micha": "Micha", "nahum": "Nahum", "hab": "Habakuk", "habakuk": "Habakuk",
-    "zef": "Zefanja", "zefanja": "Zefanja", "haggaï": "Haggai", "haggai": "Haggai",
-    "zach": "Zacharia", "zacharia": "Zacharia",
-    "mal": "Maleachi", "maleachi": "Maleachi",
-    # NT
-    "mat": "Mattheüs", "mattheus": "Mattheüs", "matheus": "Mattheüs", "mt": "Mattheüs",
-    "mark": "Markus", "marcus": "Markus", "mr": "Markus",
-    "luc": "Lukas", "lukas": "Lukas", "lk": "Lukas",
-    "joh": "Johannes", "johannes": "Johannes", "jn": "Johannes",
-    "hand": "Handelingen", "handelingen": "Handelingen",
-    "rom": "Romeinen", "romeinen": "Romeinen",
-    "1kor": "1 Korinthe", "1 kor": "1 Korinthe", "1 korinthe": "1 Korinthe", "1 korintiers": "1 Korinthe", "1 korintiërs": "1 Korinthe",
-    "2kor": "2 Korinthe", "2 kor": "2 Korinthe", "2 korinthe": "2 Korinthe", "2 korintiërs": "2 Korinthe",
-    "gal": "Galaten", "ef": "Efeze", "efeze": "Efeze",
-    "fil": "Filippenzen", "filippenzen": "Filippenzen",
-    "kol": "Kolossenzen", "kolossenzen": "Kolossenzen",
-    "1thess": "1 Thessalonicenzen", "2thess": "2 Thessalonicenzen",
-    "1tim": "1 Timotheüs", "2tim": "2 Timotheüs",
-    "tit": "Titus", "filemon": "Filemon",
-    "heb": "Hebreeën", "hebreeen": "Hebreeën",
-    "jak": "Jakobus", "1petr": "1 Petrus", "2petr": "2 Petrus",
-    "1joh": "1 Johannes", "2joh": "2 Johannes", "3joh": "3 Johannes",
-    "jud": "Judas", "openb": "Openbaring", "openbaring": "Openbaring",
-}
-
-BOOK_CANON = set(ALIASES.values()) | {
-    "Genesis","Exodus","Leviticus","Numeri","Deuteronomium","Jozua","Richteren","Ruth","1 Samuël","2 Samuël","1 Koningen","2 Koningen","1 Kronieken","2 Kronieken","Ezra","Nehemia","Ester","Job","Psalmen","Spreuken","Prediker","Hooglied","Jesaja","Jeremia","Klaagliederen","Ezechiël","Daniël","Hosea","Joël","Amos","Obadja","Jona","Micha","Nahum","Habakuk","Zefanja","Haggai","Zacharia","Maleachi","Mattheüs","Markus","Lukas","Johannes","Handelingen","Romeinen","1 Korinthe","2 Korinthe","Galaten","Efeze","Filippenzen","Kolossenzen","1 Thessalonicenzen","2 Thessalonicenzen","1 Timotheüs","2 Timotheüs","Titus","Filemon","Hebreeën","Jakobus","1 Petrus","2 Petrus","1 Johannes","2 Johannes","3 Johannes","Judas","Openbaring"
-}
-
-REF_RE = re.compile(r"^\s*([1-3]?\s?[A-Za-zÀ-ſ.]+)\s+(\d+)(?::(\d+)(?:-(\d+))?)?\s*$")
-
-
-def normalize_book(name: str) -> str:
-    key = name.strip().lower().replace(".", "").replace("  ", " ")
-    key = key.replace("matth", "mat")  # veelgemaakte variant
-    return ALIASES.get(key, name.strip().title())
-
-
-def parse_reference(text: str) -> Optional[Dict[str, Any]]:
-    """Parse 'Mattheus 20:1-15' etc. Return dict or None."""
-    m = REF_RE.match(text.replace("Mattheus", "Mattheüs"))
-    if not m:
-        return None
-    raw_book, chapter, v1, v2 = m.groups()
-    boek = normalize_book(raw_book)
-    if boek not in BOOK_CANON:
-        return None
-    ref = {
-        "boek": boek,
-        "hoofdstuk": int(chapter),
-    }
-    if v1:
-        ref["vers_start"] = int(v1)
-    if v2:
-        ref["vers_einde"] = int(v2)
-    return ref
-
-
-# ---------- Qdrant search ----------
-
-def search_qdrant(query: str, k: int = 5, ref: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Search Qdrant using embeddings + optional structured filter on boek/hoofdstuk/vers."""
-    # Build embedding for vector search
-    emb = client.embeddings.create(model="text-embedding-3-small", input=query)
-    vector = emb.data[0].embedding
-
-    q_filter = None
-    if ref:
-        must: List[Any] = []
-        if "boek" in ref:
-            must.append(qmodels.FieldCondition(key="boek", match=qmodels.MatchValue(value=ref["boek"])))
-        if "hoofdstuk" in ref:
-            must.append(qmodels.FieldCondition(key="hoofdstuk", match=qmodels.MatchValue(value=ref["hoofdstuk"])))
-        # NB: vaak is elk punt 1 vers in de payload; meestal filter je op boek/hoofdstuk en laat je vector de verzen vinden
-        if must:
-            q_filter = qmodels.Filter(must=must)
-
-    hits = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=vector,
-        limit=k,
-        with_payload=True,
-        score_threshold=None,
-        query_filter=q_filter,
-    )
-
-    results = []
-    for h in hits:
-        p = h.payload or {}
-        if "tekst" not in p:
-            continue
-        results.append({
-            "tekst": p.get("tekst", ""),
-            "boek": p.get("boek", ""),
-            "hoofdstuk": p.get("hoofdstuk", 0),
-            "vers": p.get("vers", ""),
-            "score": getattr(h, "score", None),
-        })
-    return results
-
-
-# ---------- Flask ----------
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": [
+DEFAULT_ORIGINS = [
     "https://www.degrondvraag.com",
     "https://degrondvraag.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-]}})
-
-# ---------- System prompt (tool-driven) ----------
-SYSTEM_PROMPT = (
-    """
-Jij bent **Clarus** (Latijn: 'duidelijkheid'), de bedachtzame en bondige chat-hulp van degrondvraag.com.
-
-Context & grenzen:
-- Baseer je antwoorden **uitsluitend** op (a) de meegegeven essay-tekst en (b) Bijbelverzen die via de tool *search_bible* worden aangeleverd.
-- Geen externe kennis of verzinsels. Citeer verzen **letterlijk** en geef altijd de bron (Boek Hoofdstuk:Vers-range).
-- Geef compacte, natuurlijke alinea's; gebruik opsommingen alleen als dat functioneel is.
-- Zeg nooit dat je een AI bent. Begroet alleen bij het begin van de sessie.
-
-Retrieval-regels (belangrijk):
-- Als de vraag Bijbelcontext vereist of refereert aan een passage, roep dan de tool `search_bible` aan met een zo specifiek mogelijke **referentie** (bijv. "Mattheüs 20:1-16").
-- Is de gebruiker vaag (bijv. "Mattheus 20" of "Mattheüs 20"), kies dan het **hele hoofdstuk** of vraag om verfijning van de verzen wanneer nodig.
-- Let op Nederlandse diakritiek en canonieke namen (bijv. *Mattheüs*, *1 Korinthe*). Normaliseer waar nodig.
-- Als *search_bible* niets teruggeeft, vraag om een preciezere referentie of alternatieve formulering.
-
-Antwoordvorm:
-1) Als je verzen hebt: eerst **citeren** (letterlijk, met referentie), daarna pas een korte toelichting **alleen als daarom gevraagd wordt**.
-2) Als je verzen nodig hebt maar ze ontbreken: vraag expliciet om de referentie of voer `search_bible` uit met je beste gok.
-3) Geen samenvattingen of analyses van het hele essay tenzij expliciet gevraagd.
-"""
-).strip()
-
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_bible",
-            "description": "Zoek in Qdrant naar Bijbelverzen op basis van een referentie of zoekterm.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Vrije zoekterm of referentie, bijv. 'Mattheüs 20:1-16' of een trefwoord."},
-                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
-                },
-                "required": ["query"],
-            },
-        },
-    }
 ]
 
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", ",".join(DEFAULT_ORIGINS)).split(",")
+    if origin.strip()
+]
 
-# ---------- Tool dispatcher ----------
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-def tool_search_bible(args_json: str) -> str:
-    args = json.loads(args_json or "{}")
-    raw_query: str = args.get("query", "").strip()
-    top_k: int = int(args.get("top_k", 5))
-
-    # probeer referentie parsing
-    ref = parse_reference(raw_query)
-    # fallback normalisatie (bij "Mattheus 20" zonder dubbelpunt)
-    if not ref:
-        m = re.match(r"^\s*([1-3]?\s?[A-Za-z\u00c0-\u017f.]+)\s+(\d+)\s*$", raw_query)
-        if m:
-            ref = {"boek": normalize_book(m.group(1)), "hoofdstuk": int(m.group(2))}
-
-    logging.info(f"[search_bible] query='{raw_query}', ref={ref}")
-    results = search_qdrant(raw_query, k=top_k, ref=ref)
-
-    # format compact for the model
-    return json.dumps({
-        "query": raw_query,
-        "ref": ref,
-        "hits": results,
-    }, ensure_ascii=False)
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": CORS_ORIGINS}})
 
 
-# ---------- Chat route ----------
-@app.route("/chat", methods=["POST"])
-def clarus():
-    data = request.get_json(force=True, silent=True) or {}
-    essay = data.get("essay", "")
-    vraag = data.get("vraag", "")
-    history: List[Dict[str, str]] = data.get("history", [])
+PROJECT_CONTEXT = """
+degrondvraag.com is an independent essay project about moral, religious, philosophical and existential questions.
+It exists to slow down thought: not to deliver quick certainty, but to expose assumptions, clarify terms and help readers think more carefully with the essays.
+The site was built and is maintained by its private administrator and author. The administrator deliberately keeps his identity outside the public experience. Do not name, infer or speculate about him.
+Clarus is the site's reflective assistant. The name comes from the Latin word for clarity. Clarus is not a database of revelations and not a religious authority. It is a language model guided by pre-written instructions, essay context and project context to help readers formulate clearer questions, distinctions and objections.
+Clarus currently has no Qdrant or vector RAG database. It should not pretend to retrieve external sources. It should work from the essay text supplied by the frontend, the conversation and the project context above.
+""".strip()
 
-    if not vraag:
-        return jsonify({"antwoord": "Geen vraag ontvangen"}), 400
+
+SYSTEM_PROMPT = """
+You are Clarus, the reflective assistant of degrondvraag.com.
+
+Primary task:
+- Help readers understand, question and refine the essay they are reading.
+- Use high academic language, but remain intelligible and precise.
+- Respond in the user's language. Use Dutch for Dutch questions and English for English questions. If the frontend provides a language value, follow it.
+
+Knowledge boundaries:
+- You may use the supplied essay text, the supplied conversation history and the project context.
+- You may use general conceptual vocabulary from philosophy, ethics, theology, literary interpretation and critical theory.
+- You must not claim live retrieval, Qdrant search, RAG access or access to a private knowledge base.
+- Do not make factual claims about the anonymous administrator beyond the project context.
+- Do not identify, infer or speculate about the administrator.
+
+Bible and religion:
+- Do not default to biblical interpretation.
+- Do not cite the Bible as an authority unless the user explicitly asks for biblical comparison, scriptural context or theological framing.
+- If such a comparison is requested, make clear that you are offering a conceptual comparison from general knowledge, not retrieval from a Bible database.
+
+Style:
+- Prefer compact, rigorous paragraphs.
+- Define key distinctions before giving an answer.
+- Ask one clarifying question only when the user's question is too ambiguous to answer responsibly.
+- Avoid therapeutic language, motivational phrasing and casual chatbot filler.
+- Do not overstate certainty.
+- Never pretend to be human. If asked what you are, say you are Clarus, a model guided by pre-written instructions for this site.
+""".strip()
+
+
+ABOUT_CLARUS = {
+    "nl": {
+        "title": "Over Clarus",
+        "body": (
+            "Clarus is de reflectieve assistent van degrondvraag.com. De naam verwijst naar helderheid. "
+            "Clarus is een taalmodel met vooraf geschreven instructies, essaycontext en projectcontext. "
+            "Het systeem gebruikt nu geen Qdrant- of RAG-database en hoort geen externe bronnen te verzinnen. "
+            "Gesprekken worden gelogd om fouten, stijl en bruikbaarheid te kunnen beoordelen. Deel daarom geen persoonlijke of gevoelige informatie."
+        ),
+    },
+    "en": {
+        "title": "About Clarus",
+        "body": (
+            "Clarus is the reflective assistant of degrondvraag.com. The name points to clarity. "
+            "Clarus is a language model guided by pre-written instructions, essay context and project context. "
+            "It currently uses no Qdrant or RAG database and should not invent external retrieval. "
+            "Conversations are logged so errors, style and usefulness can be reviewed. Do not share personal or sensitive information."
+        ),
+    },
+}
+
+
+def strip_html(value: str) -> str:
+    text = re.sub(r"<(script|style).*?</\1>", " ", value or "", flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def trim_text(value: str, limit: int) -> str:
+    value = value or ""
+    if len(value) <= limit:
+        return value
+    return value[:limit].rsplit(" ", 1)[0] + "..."
+
+
+def normalize_language(value: str, question: str) -> str:
+    if value in {"nl", "en"}:
+        return value
+    dutch_markers = {"wat", "waarom", "hoe", "essay", "vraag", "bedoelt", "kun", "niet", "wel"}
+    words = set(re.findall(r"[a-zA-Z]+", (question or "").lower()))
+    return "nl" if words & dutch_markers else "en"
+
+
+def build_messages(data: Dict[str, Any]) -> List[Dict[str, str]]:
+    question = trim_text(data.get("vraag", ""), 1800)
+    language = normalize_language(data.get("language", ""), question)
+    essay_title = trim_text(data.get("essayTitle", ""), 240)
+    essay = trim_text(strip_html(data.get("essay", "")), 12000)
+    history = data.get("history", [])
+
+    language_instruction = (
+        "Antwoord in het Nederlands." if language == "nl" else "Answer in English."
+    )
 
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Essay-context (alleen gebruiken als bron):\n\n{essay}"},
+        {"role": "system", "content": f"{language_instruction}\n\nProject context:\n{PROJECT_CONTEXT}"},
+        {
+            "role": "system",
+            "content": f"Essay title: {essay_title or 'Untitled'}\n\nEssay text supplied by the frontend:\n{essay}",
+        },
     ]
 
-    for msg in history:
-        if msg.get("role") in {"user", "assistant"} and isinstance(msg.get("content"), str):
-            messages.append({"role": msg["role"], "content": msg["content"]})
+    for msg in history[-8:]:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str):
+            messages.append({"role": role, "content": trim_text(content, 1400)})
 
-    messages.append({"role": "user", "content": vraag})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def create_completion(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    last_error: Optional[Exception] = None
+    for model in [CLARUS_MODEL, CLARUS_FALLBACK_MODEL]:
+        if not model:
+            continue
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_completion_tokens=CLARUS_MAX_OUTPUT_TOKENS,
+            )
+            content = (response.choices[0].message.content or "").strip()
+            usage = response.usage.model_dump() if getattr(response, "usage", None) else {}
+            return {"answer": content, "model": model, "usage": usage}
+        except Exception as exc:  # Try the configured fallback before failing.
+            last_error = exc
+            logger.warning("Clarus model call failed for %s: %s", model, exc)
+
+    raise last_error or RuntimeError("No model configured.")
+
+
+def get_ip_hash() -> Optional[str]:
+    if not IP_HASH_SALT:
+        return None
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    ip = forwarded.split(",")[0].strip() or request.remote_addr or ""
+    return hashlib.sha256(f"{IP_HASH_SALT}:{ip}".encode("utf-8")).hexdigest()
+
+
+def append_log(entry: Dict[str, Any]) -> None:
+    CLARUS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CLARUS_LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def read_log_tail(limit: int = 100) -> List[Dict[str, Any]]:
+    if not CLARUS_LOG_PATH.exists():
+        return []
+    lines = CLARUS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    entries = []
+    for line in lines[-limit:]:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return list(reversed(entries))
+
+
+def init_firebase_admin() -> bool:
+    if firebase_admin is None:
+        return False
+    if firebase_admin._apps:
+        return True
 
     try:
-        # loop to handle tool calls (max 3 rounds)
-        for _ in range(3):
-            resp = client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=messages,
-                temperature=0.2,
-                max_tokens=800,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+        service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if service_account:
+            firebase_admin.initialize_app(credentials.Certificate(json.loads(service_account)))
+        else:
+            firebase_admin.initialize_app()
+        return True
+    except Exception as exc:
+        logger.warning("Firebase Admin SDK is not configured: %s", exc)
+        return False
 
-            choice = resp.choices[0]
-            msg = choice.message
 
-            if msg.tool_calls:
-                # execute tools sequentially
-                for tool_call in msg.tool_calls:
-                    if tool_call.function.name == "search_bible":
-                        tool_payload = tool_search_bible(tool_call.function.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "content": tool_payload,
-                        })
-                # continue the loop to let the model consume tool outputs
-                continue
+def require_admin() -> Optional[Any]:
+    if not init_firebase_admin():
+        return None
 
-            # no tool calls -> we have a final answer
-            final_answer = (msg.content or "").strip()
-            logging.info(f"[Clarus antwoord] {final_answer[:400]}")
-            return jsonify({"antwoord": final_answer})
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return None
 
-        # if loop exhausted
-        return jsonify({"error": "Teveel tool-stappen; probeer je vraag te verduidelijken."}), 429
+    token = header.removeprefix("Bearer ").strip()
+    try:
+        decoded = auth.verify_id_token(token)
+    except Exception as exc:
+        logger.warning("Invalid Firebase token for Clarus logs: %s", exc)
+        return None
 
-    except Exception as e:
-        logging.exception("[Clarus error]")
+    email = (decoded.get("email") or "").lower()
+    if decoded.get("admin") is True or email == ADMIN_EMAIL:
+        return decoded
+    return None
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "model": CLARUS_MODEL})
+
+
+@app.route("/clarus/about", methods=["GET"])
+def clarus_about():
+    language = request.args.get("language", "nl")
+    return jsonify(ABOUT_CLARUS.get(language, ABOUT_CLARUS["nl"]))
+
+
+@app.route("/chat", methods=["POST"])
+def clarus_chat():
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("vraag") or "").strip()
+    if not question:
+        return jsonify({"error": "Geen vraag ontvangen."}), 400
+
+    language = normalize_language(data.get("language", ""), question)
+    messages = build_messages(data)
+    log_id = str(uuid.uuid4())
+
+    try:
+        result = create_completion(messages)
+        answer = result["answer"]
+        if not answer:
+            raise RuntimeError("Model returned an empty answer.")
+
+        entry = {
+            "id": log_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "language": language,
+            "model": result["model"],
+            "essayId": data.get("essayId"),
+            "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+            "question": trim_text(question, 2400),
+            "answer": trim_text(answer, 5000),
+            "usage": result.get("usage", {}),
+            "ipHash": get_ip_hash(),
+            "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
+        }
+        append_log(entry)
+        return jsonify({"antwoord": answer, "logId": log_id, "model": result["model"]})
+
+    except Exception as exc:
+        logger.exception("Clarus error")
+        append_log({
+            "id": log_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "language": language,
+            "essayId": data.get("essayId"),
+            "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+            "question": trim_text(question, 2400),
+            "error": str(exc),
+            "ipHash": get_ip_hash(),
+            "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
+        })
         return jsonify({"error": "Er ging iets mis met Clarus."}), 500
+
+
+@app.route("/admin/clarus/logs", methods=["GET"])
+def clarus_logs():
+    if require_admin() is None:
+        return jsonify({"error": "Niet bevoegd."}), 403
+
+    limit = min(max(int(request.args.get("limit", "100")), 1), 500)
+    return jsonify({"logs": read_log_tail(limit)})
 
 
 if __name__ == "__main__":
