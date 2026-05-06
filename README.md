@@ -13,12 +13,13 @@ CLARUS_FALLBACK_MODEL=gpt-5.4-mini
 CLARUS_MAX_OUTPUT_TOKENS=700
 ADMIN_EMAIL=luks@degrondvraag.com
 FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+CLARUS_LOG_COLLECTION=clarusLogs
 CLARUS_LOG_PATH=logs/clarus_interactions.jsonl
 CLARUS_IP_HASH_SALT=choose-a-long-random-secret
 CORS_ORIGINS=https://www.degrondvraag.com,https://degrondvraag.com,http://localhost:5173
 ```
 
-`FIREBASE_SERVICE_ACCOUNT_JSON` is needed only for the admin log endpoint. Without it, `/chat` still works, but `/admin/clarus/logs` cannot verify Firebase admin tokens.
+`FIREBASE_SERVICE_ACCOUNT_JSON` is needed for persistent Firestore logs and the admin log endpoint. Without it, `/chat` still works and writes the local JSONL fallback, but Render's filesystem should not be treated as durable storage.
 
 ## Routes
 
@@ -30,4 +31,6 @@ CORS_ORIGINS=https://www.degrondvraag.com,https://degrondvraag.com,http://localh
 
 ## Logs
 
-Interactions are written as JSON lines. The log entry stores the question, answer, model, usage, essay id, essay title, language, user agent and an optional salted IP hash. Do not enable the IP hash unless you have a clear reason to keep it.
+Interactions are written to Firestore collection `clarusLogs` when Firebase Admin is configured. The backend also writes a local JSONL fallback. The log entry stores the question, answer, model, usage, essay id, essay title, language, user agent, status and an optional salted IP hash. Do not enable the IP hash unless you have a clear reason to keep it.
+
+Clarus has a strict scope guard. It should answer only about essays, morality, religion as a concept, philosophy, existential questions, argument analysis and relevant criticism of the site. Obvious coding or general assistant requests are refused before a model call is made.

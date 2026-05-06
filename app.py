@@ -15,11 +15,12 @@ from openai import OpenAI
 
 try:
     import firebase_admin
-    from firebase_admin import auth, credentials
+    from firebase_admin import auth, credentials, firestore as firebase_firestore
 except Exception:  # pragma: no cover - firebase-admin is optional until admin logs are enabled.
     firebase_admin = None
     auth = None
     credentials = None
+    firebase_firestore = None
 
 load_dotenv()
 
@@ -29,8 +30,9 @@ logger = logging.getLogger("clarus")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLARUS_MODEL = os.getenv("CLARUS_MODEL", "gpt-5.4-nano")
 CLARUS_FALLBACK_MODEL = os.getenv("CLARUS_FALLBACK_MODEL", "gpt-5.4-mini")
-CLARUS_MAX_OUTPUT_TOKENS = int(os.getenv("CLARUS_MAX_OUTPUT_TOKENS", "700"))
+CLARUS_MAX_OUTPUT_TOKENS = min(int(os.getenv("CLARUS_MAX_OUTPUT_TOKENS", "360")), 500)
 CLARUS_LOG_PATH = Path(os.getenv("CLARUS_LOG_PATH", "logs/clarus_interactions.jsonl"))
+CLARUS_LOG_COLLECTION = os.getenv("CLARUS_LOG_COLLECTION", "clarusLogs")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "luks@degrondvraag.com").strip().lower()
 IP_HASH_SALT = os.getenv("CLARUS_IP_HASH_SALT", "")
 
@@ -80,6 +82,9 @@ Identity:
 Purpose:
 - Help readers understand, question and refine the essay they are reading.
 - Clarify concepts, expose assumptions, distinguish claims and formulate stronger objections.
+- Stay inside the intellectual domain of degrondvraag.com: the current essay, morality, religion as a concept, philosophy, existential questions, argument analysis and criticism of the site.
+- Refuse unrelated practical tasks. Do not write code, debug code, create calculators, give recipes, plan travel, provide shopping advice, draft marketing copy, solve routine homework or act as a general assistant.
+- When refusing an unrelated request, use one brief sentence and redirect the user to an essay, a moral concept or an existential objection.
 - Do not flatter the user or the essay. Be careful, restrained and intellectually honest.
 - If the user criticizes Clarus, the site, the writing, the design or a technical issue, acknowledge the criticism briefly and direct them to the anonymous feedback page when a concrete report or suggestion would be useful.
 
@@ -102,7 +107,8 @@ Religion:
 
 Brevity and cost discipline:
 - Prefer short answers.
-- Default length is 2 to 5 compact paragraphs or a short numbered list.
+- Default length is 1 to 3 compact paragraphs or a short numbered list.
+- For ordinary questions, stay under 120 words.
 - Use many tokens only when the user explicitly asks for depth, a full analysis, a long explanation, an essay-level response or when the question is genuinely profound and cannot be answered responsibly in brief.
 - Do not repeat the whole essay. Do not summarize more than needed.
 - Ask at most one clarifying question when the user's request is too ambiguous.
@@ -163,6 +169,127 @@ def normalize_language(value: str, question: str) -> str:
     dutch_markers = {"wat", "waarom", "hoe", "essay", "vraag", "bedoelt", "kun", "niet", "wel"}
     words = set(re.findall(r"[a-zA-Z]+", (question or "").lower()))
     return "nl" if words & dutch_markers else "en"
+
+
+DEEP_TOPIC_TERMS = {
+    "argument",
+    "admin",
+    "assumption",
+    "belief",
+    "beheerder",
+    "conscience",
+    "clarus",
+    "degrondvraag",
+    "ethic",
+    "ethical",
+    "ethics",
+    "essay",
+    "feedback",
+    "evil",
+    "existential",
+    "faith",
+    "freedom",
+    "god",
+    "justice",
+    "meaning",
+    "moral",
+    "morality",
+    "philosophy",
+    "religion",
+    "religious",
+    "site",
+    "responsibility",
+    "suffering",
+    "truth",
+    "value",
+    "website",
+    "waarheid",
+    "waarde",
+    "waarden",
+    "verantwoordelijkheid",
+    "vrijheid",
+    "geloof",
+    "religie",
+    "filosofie",
+    "moreel",
+    "moraal",
+    "ethiek",
+    "ethisch",
+    "existentieel",
+    "betekenis",
+    "lijden",
+    "kwaad",
+    "rechtvaardigheid",
+}
+
+OFF_TOPIC_PATTERNS = [
+    r"\bpython\b",
+    r"\bjavascript\b",
+    r"\btypescript\b",
+    r"\breact\b",
+    r"\bhtml\b",
+    r"\bcss\b",
+    r"\bcalculator\b",
+    r"\brekenmachine\b",
+    r"\bcode\b",
+    r"\bscript\b",
+    r"\bfunction\b",
+    r"\bdebug\b",
+    r"\binstall\b",
+    r"\bdeploy\b",
+    r"\brecipe\b",
+    r"\brecept\b",
+    r"\btravel\b",
+    r"\breis\b",
+    r"\bshopping\b",
+    r"\bkopen\b",
+    r"\bmarketing\b",
+    r"\bworkout\b",
+    r"\bfitness\b",
+    r"\bstock\b",
+    r"\bcrypto\b",
+    r"\bemail\b",
+    r"\bresume\b",
+    r"\bcv\b",
+    r"\bmake me\b",
+    r"\bbuild me\b",
+    r"\bwrite me\b",
+    r"\bmaak een\b",
+    r"\bschrijf een\b",
+    r"\bbouw een\b",
+]
+
+
+def is_off_topic(question: str) -> bool:
+    text = (question or "").lower()
+    if not text:
+        return False
+
+    words = set(re.findall(r"[a-zA-ZÀ-ÿ]+", text))
+    has_deep_context = bool(words & DEEP_TOPIC_TERMS)
+    if has_deep_context:
+        return False
+
+    if any(re.search(pattern, text) for pattern in OFF_TOPIC_PATTERNS):
+        return True
+
+    practical_request = re.search(
+        r"\b(how do i|how to|can you|could you|please|maak|hoe maak|kun je|kan je)\b.*"
+        r"\b(make|build|write|create|fix|debug|install|deploy|cook|buy|earn|maak|bouw|schrijf|repareer|installeer)\b",
+        text,
+    )
+    return bool(practical_request)
+
+
+def scope_redirect(language: str) -> str:
+    if language == "nl":
+        return (
+            "Dat valt buiten mijn taak. Stel een vraag over het essay, een moreel begrip "
+            "of een existentieel bezwaar."
+        )
+    return (
+        "That falls outside my task. Ask about the essay, a moral concept or an existential objection."
+    )
 
 
 def build_messages(data: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -272,10 +399,100 @@ def get_ip_hash() -> Optional[str]:
     return hashlib.sha256(f"{IP_HASH_SALT}:{ip}".encode("utf-8")).hexdigest()
 
 
-def append_log(entry: Dict[str, Any]) -> None:
+def init_firebase_admin() -> bool:
+    if firebase_admin is None:
+        return False
+    if firebase_admin._apps:
+        return True
+
+    try:
+        service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if service_account:
+            firebase_admin.initialize_app(credentials.Certificate(json.loads(service_account)))
+        elif not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            return False
+        else:
+            firebase_admin.initialize_app()
+        return True
+    except Exception as exc:
+        logger.warning("Firebase Admin SDK is not configured: %s", exc)
+        return False
+
+
+def get_firestore_client() -> Optional[Any]:
+    if firebase_firestore is None or not init_firebase_admin():
+        return None
+    try:
+        return firebase_firestore.client()
+    except Exception as exc:
+        logger.warning("Firestore client is not available: %s", exc)
+        return None
+
+
+def write_firestore_log(entry: Dict[str, Any]) -> bool:
+    db = get_firestore_client()
+    if db is None:
+        return False
+    try:
+        db.collection(CLARUS_LOG_COLLECTION).document(entry["id"]).set(entry, merge=True)
+        return True
+    except Exception as exc:
+        logger.warning("Could not write Clarus log to Firestore: %s", exc)
+        return False
+
+
+def build_log_entry(
+    data: Dict[str, Any],
+    language: str,
+    question: str,
+    log_id: str,
+    **extra: Any,
+) -> Dict[str, Any]:
+    entry = {
+        "id": log_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "language": language,
+        "essayId": data.get("essayId"),
+        "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+        "question": trim_text(question, 2400),
+        "ipHash": get_ip_hash(),
+        "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
+    }
+    entry.update(extra)
+    return entry
+
+
+def append_file_log(entry: Dict[str, Any]) -> None:
     CLARUS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CLARUS_LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def append_log(entry: Dict[str, Any]) -> None:
+    firestore_ok = write_firestore_log(entry)
+    try:
+        append_file_log(entry)
+    except Exception as exc:
+        if firestore_ok:
+            logger.warning("Could not write Clarus JSONL fallback log: %s", exc)
+        else:
+            logger.warning("Could not write Clarus log anywhere: %s", exc)
+
+
+def read_firestore_logs(limit: int = 100) -> Optional[List[Dict[str, Any]]]:
+    db = get_firestore_client()
+    if db is None:
+        return None
+    try:
+        query = (
+            db.collection(CLARUS_LOG_COLLECTION)
+            .order_by("timestamp", direction=firebase_firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+        return [doc.to_dict() for doc in query.stream()]
+    except Exception as exc:
+        logger.warning("Could not read Clarus logs from Firestore: %s", exc)
+        return None
 
 
 def read_log_tail(limit: int = 100) -> List[Dict[str, Any]]:
@@ -289,24 +506,6 @@ def read_log_tail(limit: int = 100) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return list(reversed(entries))
-
-
-def init_firebase_admin() -> bool:
-    if firebase_admin is None:
-        return False
-    if firebase_admin._apps:
-        return True
-
-    try:
-        service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-        if service_account:
-            firebase_admin.initialize_app(credentials.Certificate(json.loads(service_account)))
-        else:
-            firebase_admin.initialize_app()
-        return True
-    except Exception as exc:
-        logger.warning("Firebase Admin SDK is not configured: %s", exc)
-        return False
 
 
 def require_admin() -> Optional[Any]:
@@ -349,8 +548,22 @@ def clarus_chat():
         return jsonify({"error": "Geen vraag ontvangen."}), 400
 
     language = normalize_language(data.get("language", ""), question)
-    messages = build_messages(data)
     log_id = str(uuid.uuid4())
+
+    if is_off_topic(question):
+        answer = scope_redirect(language)
+        append_log(build_log_entry(
+            data,
+            language,
+            question,
+            log_id,
+            model="scope-guard",
+            answer=answer,
+            status="refused_off_topic",
+        ))
+        return jsonify({"antwoord": answer, "logId": log_id, "model": "scope-guard"})
+
+    messages = build_messages(data)
 
     try:
         result = create_completion(messages)
@@ -358,35 +571,28 @@ def clarus_chat():
         if not answer:
             raise RuntimeError("Model returned an empty answer.")
 
-        entry = {
-            "id": log_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "language": language,
-            "model": result["model"],
-            "essayId": data.get("essayId"),
-            "essayTitle": trim_text(data.get("essayTitle", ""), 240),
-            "question": trim_text(question, 2400),
-            "answer": trim_text(answer, 5000),
-            "usage": result.get("usage", {}),
-            "ipHash": get_ip_hash(),
-            "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
-        }
-        append_log(entry)
+        append_log(build_log_entry(
+            data,
+            language,
+            question,
+            log_id,
+            model=result["model"],
+            answer=trim_text(answer, 5000),
+            usage=result.get("usage", {}),
+            status="completed",
+        ))
         return jsonify({"antwoord": answer, "logId": log_id, "model": result["model"]})
 
     except Exception as exc:
         logger.exception("Clarus error")
-        append_log({
-            "id": log_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "language": language,
-            "essayId": data.get("essayId"),
-            "essayTitle": trim_text(data.get("essayTitle", ""), 240),
-            "question": trim_text(question, 2400),
-            "error": str(exc),
-            "ipHash": get_ip_hash(),
-            "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
-        })
+        append_log(build_log_entry(
+            data,
+            language,
+            question,
+            log_id,
+            error=str(exc),
+            status="error",
+        ))
         return jsonify({"error": "Er ging iets mis met Clarus."}), 500
 
 
@@ -398,8 +604,42 @@ def clarus_chat_stream():
         return jsonify({"error": "Geen vraag ontvangen."}), 400
 
     language = normalize_language(data.get("language", ""), question)
-    messages = build_messages(data)
     log_id = str(uuid.uuid4())
+
+    if is_off_topic(question):
+        answer = scope_redirect(language)
+
+        @stream_with_context
+        def generate_off_topic():
+            yield sse("token", {"token": answer})
+            append_log(build_log_entry(
+                data,
+                language,
+                question,
+                log_id,
+                model="scope-guard",
+                answer=answer,
+                status="refused_off_topic",
+            ))
+            yield sse("done", {"logId": log_id, "model": "scope-guard"})
+
+        return Response(
+            generate_off_topic(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    messages = build_messages(data)
+    write_firestore_log(build_log_entry(
+        data,
+        language,
+        question,
+        log_id,
+        status="started",
+    ))
 
     @stream_with_context
     def generate():
@@ -421,33 +661,27 @@ def clarus_chat_stream():
             if not answer:
                 raise RuntimeError("Model returned an empty answer.")
 
-            append_log({
-                "id": log_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "language": language,
-                "model": result["model"],
-                "essayId": data.get("essayId"),
-                "essayTitle": trim_text(data.get("essayTitle", ""), 240),
-                "question": trim_text(question, 2400),
-                "answer": trim_text(answer, 5000),
-                "usage": result.get("usage", {}),
-                "ipHash": get_ip_hash(),
-                "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
-            })
+            append_log(build_log_entry(
+                data,
+                language,
+                question,
+                log_id,
+                model=result["model"],
+                answer=trim_text(answer, 5000),
+                usage=result.get("usage", {}),
+                status="completed",
+            ))
             yield sse("done", {"logId": log_id, "model": result["model"]})
         except Exception as exc:
             logger.exception("Clarus streaming error")
-            append_log({
-                "id": log_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "language": language,
-                "essayId": data.get("essayId"),
-                "essayTitle": trim_text(data.get("essayTitle", ""), 240),
-                "question": trim_text(question, 2400),
-                "error": str(exc),
-                "ipHash": get_ip_hash(),
-                "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
-            })
+            append_log(build_log_entry(
+                data,
+                language,
+                question,
+                log_id,
+                error=str(exc),
+                status="error",
+            ))
             yield sse("error", {"error": "Er ging iets mis met Clarus."})
 
     return Response(
@@ -466,7 +700,8 @@ def clarus_logs():
         return jsonify({"error": "Niet bevoegd."}), 403
 
     limit = min(max(int(request.args.get("limit", "100")), 1), 500)
-    return jsonify({"logs": read_log_tail(limit)})
+    logs = read_firestore_logs(limit)
+    return jsonify({"logs": logs if logs is not None else read_log_tail(limit)})
 
 
 if __name__ == "__main__":
