@@ -1,6 +1,6 @@
 # Clarus Backend
 
-Clarus is the reflective assistant for degrondvraag.com. It no longer depends on Qdrant or a Bible retrieval database. The backend sends the current essay text, project context and strict system instructions to a low-cost OpenAI model.
+Clarus is the reflective assistant for degrondvraag.com. It no longer depends on Qdrant or a Bible retrieval database. The backend sends the current essay text, optional public essay-corpus context, project context and strict system instructions to a low-cost OpenAI model.
 
 ## Environment
 
@@ -28,6 +28,8 @@ CORS_ORIGINS=https://www.degrondvraag.com,https://degrondvraag.com,http://localh
 - `POST /chat` answers a Clarus question and writes one JSONL log entry.
 - `POST /chat-stream` streams a Clarus answer as server-sent events and writes one JSONL log entry.
 - `GET /admin/clarus/logs` returns recent logs for Firebase admins.
+
+`/chat` and `/chat-stream` accept `contextType: "essay"` for a single essay and `contextType: "corpus"` with an `essayCorpus` array for site-wide essay recommendations. The corpus should contain public essay fields only: `id`, `title`, `path`, `categories`, `excerpt` and trimmed `body`.
 
 ## Logs
 

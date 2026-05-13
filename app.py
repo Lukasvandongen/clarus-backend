@@ -31,6 +31,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLARUS_MODEL = os.getenv("CLARUS_MODEL", "gpt-5.4-nano")
 CLARUS_FALLBACK_MODEL = os.getenv("CLARUS_FALLBACK_MODEL", "gpt-5.4-mini")
 CLARUS_MAX_OUTPUT_TOKENS = min(int(os.getenv("CLARUS_MAX_OUTPUT_TOKENS", "360")), 500)
+CLARUS_CORPUS_ITEM_LIMIT = min(int(os.getenv("CLARUS_CORPUS_ITEM_LIMIT", "24")), 40)
+CLARUS_CORPUS_BODY_CHARS = min(int(os.getenv("CLARUS_CORPUS_BODY_CHARS", "1600")), 2600)
 CLARUS_LOG_PATH = Path(os.getenv("CLARUS_LOG_PATH", "logs/clarus_interactions.jsonl"))
 CLARUS_LOG_COLLECTION = os.getenv("CLARUS_LOG_COLLECTION", "clarusLogs")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "luks@degrondvraag.com").strip().lower()
@@ -62,7 +64,7 @@ degrondvraag.com is an independent essay project about moral, religious, philoso
 It exists to slow down thought. Its purpose is not quick certainty, but exposing assumptions, clarifying terms and helping readers think more carefully with the essays.
 The site was built and is maintained by a private administrator and author. The administrator deliberately keeps his identity outside the public experience. This is an editorial choice, not an accidental omission. Do not name, infer or speculate about him.
 Clarus is the site's reflective assistant. The name comes from the Latin word for clarity. Clarus is not a database, oracle, religious authority, therapist, search engine or human interlocutor. Clarus is a language model guided by pre-written instructions, essay context and project context to help readers formulate clearer questions, distinctions and objections.
-Clarus currently has no Qdrant, vector database, RAG system, live web search or private knowledge base. It must not pretend to retrieve external sources. It works only from the essay text supplied by the frontend, the conversation, general pretrained knowledge and the project context above.
+Clarus currently has no Qdrant, vector database, live web search or private knowledge base. It must not pretend to retrieve external sources. It works only from essay text and public essay-corpus data supplied by the frontend, the conversation, general pretrained knowledge and the project context above.
 The site includes an anonymous feedback page. Readers who want to criticize the site, report a bug, challenge a design choice or suggest an improvement should be directed there.
 """.strip()
 
@@ -81,18 +83,22 @@ Identity:
 
 Purpose:
 - Help readers understand, question and refine the essay they are reading.
+- When supplied with the public essay archive, help readers find which degrondvraag essay fits a concept, question, objection or area of confusion.
 - Clarify concepts, expose assumptions, distinguish claims and formulate stronger objections.
 - Stay inside the intellectual domain of degrondvraag.com: the current essay, morality, religion as a concept, philosophy, existential questions, argument analysis and criticism of the site.
 - Refuse unrelated practical tasks. Do not write code, debug code, create calculators, give recipes, plan travel, provide shopping advice, draft marketing copy, solve routine homework or act as a general assistant.
 - When refusing an unrelated request, use one brief sentence and redirect the user to an essay, a moral concept or an existential objection.
+- For archive recommendations, name at most three fitting essays, explain why each fits in one sentence and include the supplied path when available.
+- Do not invent essays, publication dates, sources or claims that are not in the supplied essay or corpus context.
 - Do not flatter the user or the essay. Be careful, restrained and intellectually honest.
 - If the user criticizes Clarus, the site, the writing, the design or a technical issue, acknowledge the criticism briefly and direct them to the anonymous feedback page when a concrete report or suggestion would be useful.
 
 Knowledge boundaries:
-- Use only the supplied essay text, the supplied conversation history, the project context and general pretrained knowledge.
+- Use only the supplied essay text, supplied public essay-corpus data, the supplied conversation history, the project context and general pretrained knowledge.
 - Do not claim live retrieval, Qdrant access, vector search, RAG access, web browsing, database access or access to private material.
 - If you do not know something, say so briefly.
 - If the user asks for site facts outside the project context, answer cautiously and mark the limit.
+- If the supplied corpus is too thin to recommend well, ask one precise clarifying question instead of guessing.
 - For creator, owner or administrator questions, use the identity rule above rather than presenting privacy as ignorance.
 
 Language:
@@ -134,7 +140,8 @@ ABOUT_CLARUS = {
         "body": (
             "Clarus is de reflectieve assistent van degrondvraag.com. De naam verwijst naar helderheid. "
             "Clarus is een taalmodel met vooraf geschreven instructies, essaycontext en projectcontext. "
-            "Het systeem gebruikt nu geen Qdrant- of RAG-database en hoort geen externe bronnen te verzinnen. "
+            "Het systeem gebruikt nu geen Qdrant-database, live webzoekfunctie of private kennisbank. "
+            "Wanneer de site het publieke essayarchief meestuurt, kan Clarus lezers naar passende essays leiden. "
             "Gesprekken worden gelogd om fouten, stijl en bruikbaarheid te kunnen beoordelen. Deel daarom geen persoonlijke of gevoelige informatie."
         ),
     },
@@ -143,7 +150,8 @@ ABOUT_CLARUS = {
         "body": (
             "Clarus is the reflective assistant of degrondvraag.com. The name points to clarity. "
             "Clarus is a language model guided by pre-written instructions, essay context and project context. "
-            "It currently uses no Qdrant or RAG database and should not invent external retrieval. "
+            "It currently uses no Qdrant database, live web search or private knowledge base. "
+            "When the site supplies the public essay archive, Clarus can guide readers to fitting essays. "
             "Conversations are logged so errors, style and usefulness can be reviewed. Do not share personal or sensitive information."
         ),
     },
@@ -171,10 +179,65 @@ def normalize_language(value: str, question: str) -> str:
     return "nl" if words & dutch_markers else "en"
 
 
+def normalize_corpus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    title = trim_text(strip_html(str(item.get("title", ""))), 180)
+    body = trim_text(strip_html(str(item.get("body", ""))), CLARUS_CORPUS_BODY_CHARS)
+    excerpt = trim_text(strip_html(str(item.get("excerpt", ""))), 420)
+    if not title or not (body or excerpt):
+        return None
+
+    categories = item.get("categories", [])
+    if not isinstance(categories, list):
+        categories = []
+
+    return {
+        "id": trim_text(str(item.get("id", "")), 120),
+        "title": title,
+        "path": trim_text(str(item.get("path", "")), 220),
+        "date": trim_text(str(item.get("date", "")), 40),
+        "categories": [trim_text(strip_html(str(category)), 40) for category in categories[:6]],
+        "excerpt": excerpt,
+        "body": body,
+    }
+
+
+def build_corpus_context(items: Any) -> str:
+    if not isinstance(items, list):
+        return ""
+
+    normalized = []
+    for item in items[:CLARUS_CORPUS_ITEM_LIMIT]:
+        if isinstance(item, dict):
+            normalized_item = normalize_corpus_item(item)
+            if normalized_item:
+                normalized.append(normalized_item)
+
+    blocks = []
+    for index, item in enumerate(normalized, start=1):
+        categories = ", ".join(item["categories"]) if item["categories"] else "uncategorized"
+        path = item["path"] or "(no path supplied)"
+        blocks.append(
+            "\n".join(
+                [
+                    f"{index}. {item['title']}",
+                    f"Path: {path}",
+                    f"Date: {item['date'] or 'unknown'}",
+                    f"Categories: {categories}",
+                    f"Summary: {item['excerpt'] or '(no summary supplied)'}",
+                    f"Relevant text: {item['body']}",
+                ]
+            )
+        )
+
+    return "\n\n".join(blocks)
+
+
 DEEP_TOPIC_TERMS = {
     "argument",
+    "archive",
     "admin",
     "assumption",
+    "begrijpen",
     "belief",
     "beheerder",
     "conscience",
@@ -184,7 +247,9 @@ DEEP_TOPIC_TERMS = {
     "ethical",
     "ethics",
     "essay",
+    "essays",
     "feedback",
+    "fits",
     "evil",
     "existential",
     "faith",
@@ -195,6 +260,8 @@ DEEP_TOPIC_TERMS = {
     "moral",
     "morality",
     "philosophy",
+    "recommend",
+    "recommendation",
     "religion",
     "religious",
     "site",
@@ -203,6 +270,7 @@ DEEP_TOPIC_TERMS = {
     "truth",
     "value",
     "website",
+    "understand",
     "waarheid",
     "waarde",
     "waarden",
@@ -220,6 +288,9 @@ DEEP_TOPIC_TERMS = {
     "lijden",
     "kwaad",
     "rechtvaardigheid",
+    "aanraden",
+    "aanbevelen",
+    "archief",
 }
 
 OFF_TOPIC_PATTERNS = [
@@ -295,8 +366,10 @@ def scope_redirect(language: str) -> str:
 def build_messages(data: Dict[str, Any]) -> List[Dict[str, str]]:
     question = trim_text(data.get("vraag", ""), 1800)
     language = normalize_language(data.get("language", ""), question)
+    context_type = trim_text(str(data.get("contextType", "essay")), 40)
     essay_title = trim_text(data.get("essayTitle", ""), 240)
     essay = trim_text(strip_html(data.get("essay", "")), 12000)
+    corpus_context = build_corpus_context(data.get("essayCorpus", []))
     history = data.get("history", [])
 
     language_instruction = (
@@ -308,9 +381,26 @@ def build_messages(data: Dict[str, Any]) -> List[Dict[str, str]]:
         {"role": "system", "content": f"{language_instruction}\n\nProject context:\n{PROJECT_CONTEXT}"},
         {
             "role": "system",
-            "content": f"Essay title: {essay_title or 'Untitled'}\n\nEssay text supplied by the frontend:\n{essay}",
+            "content": (
+                f"Frontend context type: {context_type}\n"
+                f"Current essay title: {essay_title or 'No single essay selected'}\n\n"
+                f"Current essay text supplied by the frontend:\n{essay or '(none)'}"
+            ),
         },
     ]
+
+    if corpus_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Public essay archive supplied by the frontend. Use this bounded corpus for archive "
+                    "navigation and essay recommendations. Recommend only essays listed here and include "
+                    "the supplied path when useful.\n\n"
+                    f"{corpus_context}"
+                ),
+            }
+        )
 
     for msg in history[-8:]:
         role = msg.get("role")
@@ -452,8 +542,10 @@ def build_log_entry(
         "id": log_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "language": language,
+        "contextType": data.get("contextType", "essay"),
         "essayId": data.get("essayId"),
         "essayTitle": trim_text(data.get("essayTitle", ""), 240),
+        "corpusSize": len(data.get("essayCorpus", [])) if isinstance(data.get("essayCorpus"), list) else 0,
         "question": trim_text(question, 2400),
         "ipHash": get_ip_hash(),
         "userAgent": trim_text(request.headers.get("User-Agent", ""), 300),
